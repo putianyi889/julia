@@ -13,21 +13,21 @@ const _REF_NAME = Ref.body.name
 # See if the inference result of the current statement's result value might affect
 # the final answer for the method (aside from optimization potential and exceptions).
 # To do that, we need to check both for slot assignment and SSA usage.
-call_result_unused(frame::InferenceState, currpc::Int) =
-    isexpr(frame.src.code[currpc], :call) && isempty(frame.ssavalue_uses[currpc])
+call_result_unused(sv::InferenceState, currpc::Int) =
+    isexpr(sv.src.code[currpc], :call) && isempty(sv.ssavalue_uses[currpc])
 call_result_unused(si::StmtInfo) = !si.used
 
-function get_max_methods(mod::Module, interp::AbstractInterpreter)
-    max_methods = ccall(:jl_get_module_max_methods, Cint, (Any,), mod) % Int
-    max_methods < 0 ? InferenceParams(interp).max_methods : max_methods
+function get_max_methods(sv::InferenceState, interp::AbstractInterpreter)
+    max_methods = ccall(:jl_get_module_max_methods, Cint, (Any,), frame_module(sv)) % Int
+    return max_methods < 0 ? InferenceParams(interp).max_methods : max_methods
 end
 
-function get_max_methods(@nospecialize(f), mod::Module, interp::AbstractInterpreter)
+function get_max_methods(@nospecialize(f), sv::InferenceState, interp::AbstractInterpreter)
     if f !== nothing
         fmm = typeof(f).name.max_methods
         fmm !== UInt8(0) && return Int(fmm)
     end
-    return get_max_methods(mod, interp)
+    return get_max_methods(sv, interp)
 end
 
 function should_infer_this_call(interp::AbstractInterpreter, sv::InferenceState)
@@ -1252,7 +1252,6 @@ end
 
 # This is only for use with `Conditional`.
 # In general, usage of this is wrong.
-ssa_def_slot(@nospecialize(arg), sv::IRCode) = nothing
 function ssa_def_slot(@nospecialize(arg), sv::InferenceState)
     code = sv.src.code
     init = sv.currpc
@@ -1316,7 +1315,7 @@ AbstractIterationResult(cti::Vector{Any}, info::MaybeAbstractIterationInfo) =
 # Union of Tuples of the same length is converted to Tuple of Unions.
 # returns an array of types
 function precise_container_type(interp::AbstractInterpreter, @nospecialize(itft), @nospecialize(typ),
-                                sv::Union{InferenceState, IRCode})
+                                sv::AbsIntState)
     if isa(typ, PartialStruct)
         widet = typ.typ
         if isa(widet, DataType) && widet.name === Tuple.name
@@ -1386,7 +1385,7 @@ function precise_container_type(interp::AbstractInterpreter, @nospecialize(itft)
 end
 
 # simulate iteration protocol on container type up to fixpoint
-function abstract_iteration(interp::AbstractInterpreter, @nospecialize(itft), @nospecialize(itertype), sv::Union{InferenceState, IRCode})
+function abstract_iteration(interp::AbstractInterpreter, @nospecialize(itft), @nospecialize(itertype), sv::AbsIntState)
     if isa(itft, Const)
         iteratef = itft.val
     else
@@ -1475,8 +1474,8 @@ end
 
 # do apply(af, fargs...), where af is a function value
 function abstract_apply(interp::AbstractInterpreter, argtypes::Vector{Any}, si::StmtInfo,
-                        sv::Union{InferenceState, IRCode},
-                        max_methods::Int = get_max_methods(sv.mod, interp))
+                        sv::AbsIntState,
+                        max_methods::Int = get_max_methods(sv, interp))
     itft = argtype_by_index(argtypes, 2)
     aft = argtype_by_index(argtypes, 3)
     (itft === Bottom || aft === Bottom) && return CallMeta(Bottom, EFFECTS_THROWS, NoCallInfo())
@@ -1658,7 +1657,7 @@ end
 end
 
 function abstract_call_builtin(interp::AbstractInterpreter, f::Builtin, (; fargs, argtypes)::ArgInfo,
-                               sv::Union{InferenceState, IRCode}, max_methods::Int)
+                               sv::AbsIntState, max_methods::Int)
     @nospecialize f
     la = length(argtypes)
     𝕃ᵢ = typeinf_lattice(interp)
@@ -1920,8 +1919,8 @@ end
 
 # call where the function is known exactly
 function abstract_call_known(interp::AbstractInterpreter, @nospecialize(f),
-        arginfo::ArgInfo, si::StmtInfo, sv::Union{InferenceState, IRCode},
-        max_methods::Int = isa(sv, InferenceState) ? get_max_methods(f, sv.mod, interp) : 0)
+        arginfo::ArgInfo, si::StmtInfo, sv::AbsIntState,
+        max_methods::Int = get_max_methods(f, sv, interp))
     (; fargs, argtypes) = arginfo
     la = length(argtypes)
 
@@ -2060,7 +2059,7 @@ end
 
 # call where the function is any lattice element
 function abstract_call(interp::AbstractInterpreter, arginfo::ArgInfo, si::StmtInfo,
-                       sv::Union{InferenceState, IRCode}, max_methods::Union{Int, Nothing} = isa(sv, IRCode) ? 0 : nothing)
+                       sv::AbsIntState, max_methods::Union{Int, Nothing} = nothing)
     argtypes = arginfo.argtypes
     ft = widenslotwrapper(argtypes[1])
     f = singleton_type(ft)
@@ -2083,10 +2082,10 @@ function abstract_call(interp::AbstractInterpreter, arginfo::ArgInfo, si::StmtIn
             return CallMeta(Any, Effects(), NoCallInfo())
         end
         # non-constant function, but the number of arguments is known and the `f` is not a builtin or intrinsic
-        max_methods = max_methods === nothing ? get_max_methods(sv.mod, interp) : max_methods
+        max_methods = max_methods === nothing ? get_max_methods(sv, interp) : max_methods
         return abstract_call_gf_by_type(interp, nothing, arginfo, si, argtypes_to_type(argtypes), sv, max_methods)
     end
-    max_methods = max_methods === nothing ? get_max_methods(f, sv.mod, interp) : max_methods
+    max_methods = max_methods === nothing ? get_max_methods(f, sv, interp) : max_methods
     return abstract_call_known(interp, f, arginfo, si, sv, max_methods)
 end
 
@@ -2138,7 +2137,7 @@ function abstract_eval_cfunction(interp::AbstractInterpreter, e::Expr, vtypes::V
     nothing
 end
 
-function abstract_eval_value_expr(interp::AbstractInterpreter, e::Expr, vtypes::Union{VarTable, Nothing}, sv::Union{InferenceState, IRCode})
+function abstract_eval_value_expr(interp::AbstractInterpreter, e::Expr, vtypes::Union{VarTable, Nothing}, sv::AbsIntState)
     rt = Any
     head = e.head
     if head === :static_parameter
@@ -2180,23 +2179,27 @@ function abstract_eval_value_expr(interp::AbstractInterpreter, e::Expr, vtypes::
     return rt
 end
 
-function abstract_eval_special_value(interp::AbstractInterpreter, @nospecialize(e), vtypes::Union{VarTable, Nothing}, sv::Union{InferenceState, IRCode})
+function abstract_eval_special_value(interp::AbstractInterpreter, @nospecialize(e), vtypes::Union{VarTable, Nothing}, sv::AbsIntState)
     if isa(e, QuoteNode)
         return Const(e.value)
     elseif isa(e, SSAValue)
         return abstract_eval_ssavalue(e, sv)
     elseif isa(e, SlotNumber)
-        vtyp = vtypes[slot_id(e)]
-        if vtyp.undef
-            merge_effects!(interp, sv, Effects(EFFECTS_TOTAL; nothrow=false))
+        if vtypes !== nothing
+            vtyp = vtypes[slot_id(e)]
+            if vtyp.undef
+                merge_effects!(interp, sv, Effects(EFFECTS_TOTAL; nothrow=false))
+            end
+            return vtyp.typ
         end
-        return vtyp.typ
+        merge_effects!(interp, sv, Effects(EFFECTS_TOTAL; nothrow=false))
+        return Any
     elseif isa(e, Argument)
-        if !isa(vtypes, Nothing)
+        if vtypes !== nothing
             return vtypes[slot_id(e)].typ
         else
-            @assert isa(sv, IRCode)
-            return sv.argtypes[e.n]
+            @assert isa(sv, IRInterpretationState)
+            return sv.ir.argtypes[e.n] # TODO frame_argtypes(sv)[e.n] and remove the assertion
         end
     elseif isa(e, GlobalRef)
         return abstract_eval_globalref(interp, e, sv)
@@ -2205,7 +2208,7 @@ function abstract_eval_special_value(interp::AbstractInterpreter, @nospecialize(
     return Const(e)
 end
 
-function abstract_eval_value(interp::AbstractInterpreter, @nospecialize(e), vtypes::Union{VarTable, Nothing}, sv::Union{InferenceState, IRCode})
+function abstract_eval_value(interp::AbstractInterpreter, @nospecialize(e), vtypes::Union{VarTable, Nothing}, sv::AbsIntState)
     if isa(e, Expr)
         return abstract_eval_value_expr(interp, e, vtypes, sv)
     else
@@ -2214,7 +2217,7 @@ function abstract_eval_value(interp::AbstractInterpreter, @nospecialize(e), vtyp
     end
 end
 
-function collect_argtypes(interp::AbstractInterpreter, ea::Vector{Any}, vtypes::Union{VarTable, Nothing}, sv::Union{InferenceState, IRCode})
+function collect_argtypes(interp::AbstractInterpreter, ea::Vector{Any}, vtypes::Union{VarTable, Nothing}, sv::AbsIntState)
     n = length(ea)
     argtypes = Vector{Any}(undef, n)
     @inbounds for i = 1:n
@@ -2234,7 +2237,7 @@ struct RTEffects
 end
 
 function abstract_eval_statement_expr(interp::AbstractInterpreter, e::Expr, vtypes::Union{VarTable, Nothing},
-                                      sv::Union{InferenceState, IRCode}, mi::Union{MethodInstance, Nothing})::RTEffects
+                                      sv::AbsIntState)
     effects = EFFECTS_UNKNOWN
     ehead = e.head
     𝕃ᵢ = typeinf_lattice(interp)
@@ -2247,7 +2250,7 @@ function abstract_eval_statement_expr(interp::AbstractInterpreter, e::Expr, vtyp
             effects = Effects()
         else
             arginfo = ArgInfo(ea, argtypes)
-            si = StmtInfo(isa(sv, IRCode) ? true : !call_result_unused(sv, sv.currpc))
+            si = StmtInfo(sv isa InferenceState ? !call_result_unused(sv, sv.currpc) : true)
             (; rt, effects, info) = abstract_call(interp, arginfo, si, sv)
             if isa(sv, InferenceState)
                 sv.stmt_info[sv.currpc] = info
@@ -2353,9 +2356,9 @@ function abstract_eval_statement_expr(interp::AbstractInterpreter, e::Expr, vtyp
             if argtypes === nothing
                 t = Bottom
             else
-                mi′ = isa(sv, InferenceState) ? sv.linfo : mi
-                t = _opaque_closure_tfunc(𝕃ᵢ, argtypes[1], argtypes[2], argtypes[3],
-                    argtypes[4], argtypes[5:end], mi′)
+                mi = frame_instance(sv)
+                t = opaque_closure_tfunc(𝕃ᵢ, argtypes[1], argtypes[2], argtypes[3],
+                    argtypes[4], argtypes[5:end], mi)
                 if isa(t, PartialOpaque) && isa(sv, InferenceState) && !call_result_unused(sv, sv.currpc)
                     # Infer this now so that the specialization is available to
                     # optimization.
@@ -2368,7 +2371,7 @@ function abstract_eval_statement_expr(interp::AbstractInterpreter, e::Expr, vtyp
             end
         end
     elseif ehead === :foreigncall
-        (;rt, effects) = abstract_eval_foreigncall(interp, e, vtypes, sv, mi)
+        (;rt, effects) = abstract_eval_foreigncall(interp, e, vtypes, sv)
         t = rt
         if isa(sv, InferenceState)
             # mark this call statement as DCE-elgible
@@ -2399,7 +2402,7 @@ function abstract_eval_statement_expr(interp::AbstractInterpreter, e::Expr, vtyp
         sym = e.args[1]
         t = Bool
         effects = EFFECTS_TOTAL
-        if isa(sym, SlotNumber)
+        if isa(sym, SlotNumber) && vtypes !== nothing
             vtyp = vtypes[slot_id(sym)]
             if vtyp.typ === Bottom
                 t = Const(false) # never assigned previously
@@ -2407,7 +2410,7 @@ function abstract_eval_statement_expr(interp::AbstractInterpreter, e::Expr, vtyp
                 t = Const(true) # definitely assigned previously
             end
         elseif isa(sym, Symbol)
-            if isdefined(sv.mod, sym)
+            if isdefined(frame_module(sv), sym)
                 t = Const(true)
             elseif InferenceParams(interp).assume_bindings_static
                 t = Const(false)
@@ -2453,10 +2456,10 @@ function refine_partial_type(@nospecialize t)
     return t
 end
 
-function abstract_eval_foreigncall(interp::AbstractInterpreter, e::Expr, vtypes::Union{VarTable, Nothing}, sv::Union{InferenceState, IRCode}, mi::Union{MethodInstance, Nothing}=nothing)
+function abstract_eval_foreigncall(interp::AbstractInterpreter, e::Expr, vtypes::Union{VarTable, Nothing}, sv::AbsIntState)
     abstract_eval_value(interp, e.args[1], vtypes, sv)
-    mi′ = isa(sv, InferenceState) ? sv.linfo : mi
-    t = sp_type_rewrap(e.args[2], mi′, true)
+    mi = frame_instance(sv)
+    t = sp_type_rewrap(e.args[2], mi, true)
     for i = 3:length(e.args)
         if abstract_eval_value(interp, e.args[i], vtypes, sv) === Bottom
             return RTEffects(Bottom, EFFECTS_THROWS)
@@ -2480,7 +2483,7 @@ function abstract_eval_foreigncall(interp::AbstractInterpreter, e::Expr, vtypes:
     return RTEffects(t, effects)
 end
 
-function abstract_eval_phi(interp::AbstractInterpreter, phi::PhiNode, vtypes::Union{VarTable, Nothing}, sv::Union{InferenceState, IRCode})
+function abstract_eval_phi(interp::AbstractInterpreter, phi::PhiNode, vtypes::Union{VarTable, Nothing}, sv::AbsIntState)
     rt = Union{}
     for i in 1:length(phi.values)
         isassigned(phi.values, i) || continue
@@ -2502,7 +2505,7 @@ function abstract_eval_statement(interp::AbstractInterpreter, @nospecialize(e), 
         end
         return abstract_eval_special_value(interp, e, vtypes, sv)
     end
-    (;rt, effects) = abstract_eval_statement_expr(interp, e, vtypes, sv, nothing)
+    (; rt, effects) = abstract_eval_statement_expr(interp, e, vtypes, sv)
     if !effects.noinbounds
         if !sv.src.propagate_inbounds
             # The callee read our inbounds flag, but unless we propagate inbounds,
@@ -2542,7 +2545,7 @@ function abstract_eval_globalref(g::GlobalRef)
 end
 abstract_eval_global(M::Module, s::Symbol) = abstract_eval_globalref(GlobalRef(M, s))
 
-function abstract_eval_globalref(interp::AbstractInterpreter, g::GlobalRef, frame::Union{InferenceState, IRCode})
+function abstract_eval_globalref(interp::AbstractInterpreter, g::GlobalRef, sv::AbsIntState)
     rt = abstract_eval_globalref(g)
     consistent = inaccessiblememonly = ALWAYS_FALSE
     nothrow = false
@@ -2560,7 +2563,7 @@ function abstract_eval_globalref(interp::AbstractInterpreter, g::GlobalRef, fram
         consistent = inaccessiblememonly = ALWAYS_TRUE
         rt = Union{}
     end
-    merge_effects!(interp, frame, Effects(EFFECTS_TOTAL; consistent, nothrow, inaccessiblememonly))
+    merge_effects!(interp, sv, Effects(EFFECTS_TOTAL; consistent, nothrow, inaccessiblememonly))
     return rt
 end
 
@@ -2573,7 +2576,7 @@ function handle_global_assignment!(interp::AbstractInterpreter, frame::Inference
 end
 
 abstract_eval_ssavalue(s::SSAValue, sv::InferenceState) = abstract_eval_ssavalue(s, sv.ssavaluetypes)
-abstract_eval_ssavalue(s::SSAValue, src::CodeInfo) = abstract_eval_ssavalue(s, src.ssavaluetypes::Vector{Any})
+
 function abstract_eval_ssavalue(s::SSAValue, ssavaluetypes::Vector{Any})
     typ = ssavaluetypes[s.id]
     if typ === NOT_FOUND

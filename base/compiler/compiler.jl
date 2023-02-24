@@ -154,6 +154,17 @@ include("compiler/ssair/ir.jl")
 include("compiler/abstractlattice.jl")
 
 include("compiler/inferenceresult.jl")
+
+# TODO define the interface for this abstract type
+abstract type AbsIntState end
+function frame_instance end
+function frame_module(sv::AbsIntState)
+    mi = frame_instance(sv)
+    def = mi.def
+    isa(def, Module) && return def
+    return def.module
+end
+
 include("compiler/inferencestate.jl")
 
 include("compiler/typeutils.jl")

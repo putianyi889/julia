@@ -331,7 +331,7 @@ function CC.abstract_call(interp::NoinlineInterpreter,
     arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.InferenceState, max_methods::Union{Int,Nothing})
     ret = @invoke CC.abstract_call(interp::CC.AbstractInterpreter,
         arginfo::CC.ArgInfo, si::CC.StmtInfo, sv::CC.InferenceState, max_methods::Union{Int,Nothing})
-    if sv.mod in interp.noinline_modules
+    if CC.frame_module(sv) in interp.noinline_modules
         return CC.CallMeta(ret.rt, ret.effects, NoinlineCallInfo(ret.info))
     end
     return ret

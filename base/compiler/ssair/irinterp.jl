@@ -94,11 +94,12 @@ function getindex(tpdum::TwoPhaseDefUseMap, idx::Int)
     return TwoPhaseVectorView(tpdum.data, nelems, range)
 end
 
-struct IRInterpretationState
+struct IRInterpretationState <: AbsIntState
     ir::IRCode
     mi::MethodInstance
     world::UInt
     argtypes_refined::Vector{Bool}
+    sptypes::Vector{VarState}
     tpdum::TwoPhaseDefUseMap
     ssa_refined::BitSet
     lazydomtree::LazyDomtree
@@ -114,8 +115,17 @@ struct IRInterpretationState
         tpdum = TwoPhaseDefUseMap(length(ir.stmts))
         ssa_refined = BitSet()
         lazydomtree = LazyDomtree(ir)
-        return new(ir, mi, world, argtypes_refined, tpdum, ssa_refined, lazydomtree)
+        return new(ir, mi, world, argtypes_refined, ir.sptypes, tpdum, ssa_refined, lazydomtree)
     end
+end
+
+frame_instance(sv::IRInterpretationState) = sv.mi
+merge_effects!(::AbstractInterpreter, ::IRInterpretationState, ::Effects) = return
+get_max_methods(::IRInterpretationState, ::AbstractInterpreter) = 0
+get_max_methods(@nospecialize(f), ::IRInterpretationState, ::AbstractInterpreter) = 0
+ssa_def_slot(@nospecialize(arg), ::IRInterpretationState) = nothing
+function bail_out_apply(::AbstractInterpreter, @nospecialize(rt), ::IRInterpretationState)
+    return rt === Any
 end
 
 function codeinst_to_ir(interp::AbstractInterpreter, code::CodeInstance)
@@ -131,11 +141,11 @@ end
 
 function abstract_call_gf_by_type(interp::AbstractInterpreter, @nospecialize(f),
                                   arginfo::ArgInfo, si::StmtInfo, @nospecialize(atype),
-                                  sv::IRCode, max_methods::Int)
+                                  sv::IRInterpretationState, max_methods::Int)
     return CallMeta(Any, Effects(), NoCallInfo())
 end
 
-function collect_limitations!(@nospecialize(typ), ::IRCode)
+function collect_limitations!(@nospecialize(typ), ::IRInterpretationState)
     @assert !isa(typ, LimitedAccuracy) "semi-concrete eval on recursive call graph"
     return typ
 end
@@ -147,7 +157,7 @@ function concrete_eval_invoke(interp::AbstractInterpreter,
     if code === nothing
         return Pair{Any, Bool}(nothing, false)
     end
-    argtypes = collect_argtypes(interp, inst.args[2:end], nothing, irsv.ir)
+    argtypes = collect_argtypes(interp, inst.args[2:end], nothing, irsv)
     argtypes === nothing && return Pair{Any, Bool}(Union{}, false)
     effects = decode_effects(code.ipo_purity_bits)
     if is_foldable(effects) && is_all_const_arg(argtypes, #=start=#1)
@@ -169,8 +179,10 @@ function concrete_eval_invoke(interp::AbstractInterpreter,
     return Pair{Any, Bool}(nothing, is_nothrow(effects))
 end
 
+abstract_eval_ssavalue(s::SSAValue, sv::IRInterpretationState) = abstract_eval_ssavalue(s, sv.ir)
+
 function abstract_eval_phi_stmt(interp::AbstractInterpreter, phi::PhiNode, ::Int, irsv::IRInterpretationState)
-    return abstract_eval_phi(interp, phi, nothing, irsv.ir)
+    return abstract_eval_phi(interp, phi, nothing, irsv)
 end
 
 function propagate_control_effects!(interp::AbstractInterpreter, idx::Int, stmt::GotoIfNot,
@@ -237,7 +249,7 @@ function reprocess_instruction!(interp::AbstractInterpreter,
     if isa(inst, Expr)
         head = inst.head
         if head === :call || head === :foreigncall || head === :new || head === :splatnew
-            (; rt, effects) = abstract_eval_statement_expr(interp, inst, nothing, ir, irsv.mi)
+            (; rt, effects) = abstract_eval_statement_expr(interp, inst, nothing, irsv)
             # All other effects already guaranteed effect free by construction
             if is_nothrow(effects)
                 ir.stmts[idx][:flag] |= IR_FLAG_NOTHROW

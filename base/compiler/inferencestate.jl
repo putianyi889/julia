@@ -78,7 +78,7 @@ function append!(bsbmp::BitSetBoundedMinPrioritySet, itr)
     end
 end
 
-mutable struct InferenceState
+mutable struct InferenceState <: AbsIntState
     #= information about this method instance =#
     linfo::MethodInstance
     world::UInt
@@ -197,6 +197,7 @@ mutable struct InferenceState
     end
 end
 
+frame_instance(sv::InferenceState) = sv.linfo
 Effects(state::InferenceState) = state.ipo_effects
 
 function merge_effects!(::AbstractInterpreter, caller::InferenceState, effects::Effects)
@@ -205,7 +206,6 @@ end
 
 merge_effects!(interp::AbstractInterpreter, caller::InferenceState, callee::InferenceState) =
     merge_effects!(interp, caller, Effects(callee))
-merge_effects!(interp::AbstractInterpreter, caller::IRCode, effects::Effects) = nothing
 
 is_effect_overridden(sv::InferenceState, effect::Symbol) = is_effect_overridden(sv.linfo, effect)
 function is_effect_overridden(linfo::MethodInstance, effect::Symbol)
@@ -215,7 +215,7 @@ end
 is_effect_overridden(method::Method, effect::Symbol) = is_effect_overridden(decode_effects_override(method.purity), effect)
 is_effect_overridden(override::EffectsOverride, effect::Symbol) = getfield(override, effect)
 
-add_remark!(::AbstractInterpreter, sv::Union{InferenceState, IRCode}, remark) = return
+add_remark!(::AbstractInterpreter, ::AbsIntState, remark) = return
 
 struct InferenceLoopState
     sig
@@ -226,13 +226,13 @@ struct InferenceLoopState
     end
 end
 
-function bail_out_toplevel_call(::AbstractInterpreter, state::InferenceLoopState, sv::Union{InferenceState, IRCode})
+function bail_out_toplevel_call(::AbstractInterpreter, state::InferenceLoopState, sv::InferenceState)
     return isa(sv, InferenceState) && sv.restrict_abstract_call_sites && !isdispatchtuple(state.sig)
 end
-function bail_out_call(::AbstractInterpreter, state::InferenceLoopState, sv::Union{InferenceState, IRCode})
+function bail_out_call(::AbstractInterpreter, state::InferenceLoopState, sv::InferenceState)
     return state.rt === Any && !is_foldable(state.effects)
 end
-function bail_out_apply(::AbstractInterpreter, state::InferenceLoopState, sv::Union{InferenceState, IRCode})
+function bail_out_apply(::AbstractInterpreter, state::InferenceLoopState, sv::InferenceState)
     return state.rt === Any
 end
 
@@ -504,7 +504,7 @@ function sptypes_from_meth_instance(linfo::MethodInstance)
     return sptypes
 end
 
-_topmod(sv::InferenceState) = _topmod(sv.mod)
+_topmod(sv::InferenceState) = _topmod(frame_module(sv))
 
 # work towards converging the valid age range for sv
 function update_valid_age!(sv::InferenceState, worlds::WorldRange)
